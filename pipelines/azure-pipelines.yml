@@ -1,0 +1,120 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  - name: imageRepository
+    value: petclinic
+  - name: dockerfilePath
+    value: apps/container/Dockerfile
+  - name: vmImage
+    value: ubuntu-latest
+  # Variable group linked to Azure Key Vault in ADO → Pipelines → Library.
+  # Secrets (acrLoginServer, mysql-password, etc.) are pulled from KV at runtime.
+  # The ARM service connection used by this group needs Key Vault Secrets User role.
+  - group: petclinic-shared
+
+stages:
+# ── Stage 1: Build Maven project and Docker image ────────────────────────────
+  - stage: BuildAndTest
+    displayName: "Build & Test"
+    jobs:
+      - template: templates/build-container.yml
+        parameters:
+          vmImage: $(vmImage)
+          dockerfilePath: $(dockerfilePath)
+
+# ── Stage 2: Scan image for HIGH/CRITICAL CVEs ───────────────────────────────
+  - stage: SecurityScan
+    displayName: "Security Scan"
+    dependsOn: BuildAndTest
+    jobs:
+      - template: templates/security-scan.yml
+        parameters:
+          vmImage: $(vmImage)
+          imageRepository: $(imageRepository)
+
+# ── Stage 3: Push verified image to ACR ──────────────────────────────────────
+  - stage: PushImage
+    displayName: "Push to ACR"
+    dependsOn: SecurityScan
+    jobs:
+      - template: templates/push-acr.yml
+        parameters:
+          vmImage: $(vmImage)
+          imageRepository: $(imageRepository)
+
+# ── Stage 4: Deploy to Dev (auto-approved ADO environment) ───────────────────
+  - stage: DeployDev
+    displayName: "Deploy → Dev"
+    dependsOn: PushImage
+    jobs:
+      - template: templates/deploy-appservice.yml
+        parameters:
+          environmentName: dev
+          azureSubscription: $(azureServiceConnection)
+          appName: $(appServiceNameDev)
+
+# ── Stage 5: Smoke test Dev ───────────────────────────────────────────────────
+  - stage: SmokeTest
+    displayName: "Smoke Test — Dev"
+    dependsOn: DeployDev
+    jobs:
+      - template: templates/smoke-test.yml
+        parameters:
+          targetUrl: $(devSmokeTestUrl)
+          azureSubscription: $(azureServiceConnection)
+          appName: $(appServiceNameDev)
+          environmentName: dev
+
+# ── Stage 6: Deploy to Prod ───────────────────────────────────────────────────
+# ADO Environment "prod" must have an Approval check configured:
+#   ADO → Environments → prod → Approvals and Checks → + Approvals
+# The pipeline pauses here until an approver clicks Approve.
+  - stage: DeployProd
+    displayName: "Deploy → Prod"
+    dependsOn: SmokeTest
+    condition: succeeded()
+    jobs:
+      - template: templates/deploy-appservice.yml
+        parameters:
+          environmentName: prod
+          azureSubscription: $(azureServiceConnection)
+          appName: $(appServiceNameProd)
+
+# ── Stage 7: Post-deployment validation ──────────────────────────────────────
+# Runs after prod deploy succeeds — validates health, readiness, and response time.
+  - stage: PostDeployValidation
+    displayName: "Post-Deploy Validation — Prod"
+    dependsOn: DeployProd
+    condition: succeeded()
+    jobs:
+      - template: templates/post-deploy-validation.yml
+        parameters:
+          targetUrl: $(prodSmokeTestUrl)
+
+# ── Stage 8: Rollback ─────────────────────────────────────────────────────────
+# Runs only if DeployProd or PostDeployValidation fails.
+# Re-deploys the image tagged "stable" (the last known-good build).
+  - stage: Rollback
+    displayName: "Rollback — Prod"
+    dependsOn:
+      - DeployProd
+      - PostDeployValidation
+    condition: |
+      or(
+        failed('DeployProd'),
+        failed('PostDeployValidation')
+      )
+    jobs:
+      - template: templates/rollback.yml
+        parameters:
+          azureSubscription: $(azureServiceConnection)
+          appName: $(appServiceNameProd)
+          imageRepository: $(imageRepository)

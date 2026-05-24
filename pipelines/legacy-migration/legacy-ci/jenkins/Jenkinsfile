@@ -1,0 +1,44 @@
+pipeline {
+  agent any
+
+  environment {
+    IMAGE_NAME = 'petclinic'
+    REGISTRY = 'legacy-registry.local'
+  }
+
+  stages {
+    stage('Test') {
+      steps {
+        sh './mvnw test'
+      }
+    }
+
+    stage('Build Image') {
+      steps {
+        sh 'docker build -f apps/container/Dockerfile -t $REGISTRY/$IMAGE_NAME:$BUILD_NUMBER .'
+      }
+    }
+
+    stage('Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'registry-creds', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS')]) {
+          sh 'echo $REGISTRY_PASS | docker login $REGISTRY -u $REGISTRY_USER --password-stdin'
+          sh 'docker push $REGISTRY/$IMAGE_NAME:$BUILD_NUMBER'
+        }
+      }
+    }
+
+    stage('Deploy') {
+      steps {
+        sh './scripts/deploy-vm.sh dev'
+      }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
+      junit 'target/surefire-reports/*.xml'
+    }
+  }
+}
