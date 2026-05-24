@@ -1,0 +1,62 @@
+{
+  "pipelines": [
+    {
+      "tool": "bamboo",
+      "path": "pipelines/legacy-migration/legacy-ci/bamboo/bamboo-specs.yml",
+      "source_control": "bitbucket-or-bamboo-linked",
+      "runner_model": "bamboo-local-agent",
+      "build_tool": "maven-wrapper",
+      "secrets_model": "bamboo-plan-variables",
+      "artifact_store": "container-registry; pipeline-artifacts",
+      "deployment_method": "vm-scripted-ssh",
+      "target_environments": "dev; test",
+      "approval_model": "bamboo-manual-stage",
+      "risk_score": "high",
+      "risk_factors": [
+        "VM scripted deployment (fragile)",
+        "Bamboo plan variable references",
+        "manual Docker push (no immutable tag)"
+      ],
+      "migration_complexity": "medium-large \u2014 deployment project migration"
+    },
+    {
+      "tool": "gitlab",
+      "path": "pipelines/legacy-migration/legacy-ci/gitlab/.gitlab-ci.yml",
+      "source_control": "git-unspecified",
+      "runner_model": "gitlab-runner-tagged (docker)",
+      "build_tool": "maven-wrapper",
+      "secrets_model": "pipeline-variables-block",
+      "artifact_store": "container-registry; pipeline-artifacts",
+      "deployment_method": "vm-scripted-ssh",
+      "target_environments": "dev; test",
+      "approval_model": "gitlab-manual-job",
+      "risk_score": "high",
+      "risk_factors": [
+        "VM scripted deployment (fragile)",
+        "manual Docker push (no immutable tag)"
+      ],
+      "migration_complexity": "medium \u2014 runner tag and variable lift"
+    },
+    {
+      "tool": "jenkins",
+      "path": "pipelines/legacy-migration/legacy-ci/jenkins/Jenkinsfile",
+      "source_control": "git-unspecified",
+      "runner_model": "jenkins-agent-any",
+      "build_tool": "maven-wrapper",
+      "secrets_model": "jenkins-withCredentials; jenkins-usernamePassword-binding; plain-text-password-reference",
+      "artifact_store": "container-registry; jenkins-build-artifacts; pipeline-artifacts",
+      "deployment_method": "vm-scripted-ssh",
+      "target_environments": "dev; test",
+      "approval_model": "pipeline-driven (no explicit gate)",
+      "risk_score": "critical",
+      "risk_factors": [
+        "plain-text password reference",
+        "VM scripted deployment (fragile)",
+        "Jenkins-native credential binding",
+        "manual Docker push (no immutable tag)",
+        "uncontrolled agent selection"
+      ],
+      "migration_complexity": "large \u2014 plugin audit + credential migration"
+    }
+  ]
+}

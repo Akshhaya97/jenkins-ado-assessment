@@ -1,0 +1,111 @@
+parameters:
+  - name: targetUrl
+    type: string
+  - name: azureSubscription
+    type: string
+    default: ""
+  - name: appName
+    type: string
+    default: ""
+  - name: environmentName
+    type: string
+    default: "dev"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SMOKE-TEST TEMPLATE
+#
+# Validates the deployed application is healthy and responding.
+# Checks:
+#   1. /actuator/health  — Spring Boot health endpoint (must return HTTP 200, status UP)
+#   2. /                 — Homepage reachable (must return HTTP 200)
+# Retries up to 5 times with 20-second gaps to allow for cold start / container pull.
+# Deployment logs are captured and published as a pipeline artifact.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  - job: SmokeTest
+    displayName: "Smoke test — ${{ parameters.environmentName }}"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      # Wait for App Service container pull and Spring Boot startup
+      - script: |
+          echo "Waiting 40s for container to start..."
+          sleep 40
+        displayName: "Initial startup wait"
+
+      # Health check with retry — 5 attempts, 20s apart
+      - script: |
+          TARGET="${{ parameters.targetUrl }}"
+          MAX_RETRIES=5
+          RETRY_DELAY=20
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Health check attempt $i/$MAX_RETRIES — $TARGET/actuator/health"
+
+            RESPONSE=$(curl --silent --max-time 15 "$TARGET/actuator/health" 2>&1)
+            HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" --max-time 15 "$TARGET/actuator/health" 2>/dev/null)
+
+            echo "  HTTP $HTTP_STATUS — $RESPONSE"
+
+            if [ "$HTTP_STATUS" -eq 200 ]; then
+              echo "$RESPONSE" | grep -q '"status":"UP"' && {
+                echo "##[section] Health check PASSED (attempt $i)"
+                break
+              }
+              echo "HTTP 200 but status is not UP yet — retrying..."
+            fi
+
+            if [ "$i" -eq "$MAX_RETRIES" ]; then
+              echo "##[error] Health check FAILED after $MAX_RETRIES attempts"
+              exit 1
+            fi
+
+            sleep $RETRY_DELAY
+          done
+        displayName: "Smoke test: /actuator/health (with retry)"
+
+      # Homepage reachability check
+      - script: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" --max-time 15 "${{ parameters.targetUrl }}/")
+          echo "Homepage HTTP status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "##[error] Homepage check failed — HTTP $HTTP_STATUS"
+            exit 1
+          fi
+          echo "##[section] Homepage check PASSED"
+        displayName: "Smoke test: homepage reachable"
+
+      # Capture App Service runtime logs after smoke test completes
+      - task: AzureCLI@2
+        displayName: "Capture App Service runtime logs"
+        condition: and(always(), ne('${{ parameters.azureSubscription }}', ''))
+        inputs:
+          azureSubscription: ${{ parameters.azureSubscription }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            mkdir -p $(Build.ArtifactStagingDirectory)/smoke-logs
+
+            echo "Downloading App Service logs for ${{ parameters.appName }}..."
+            az webapp log download \
+              --name ${{ parameters.appName }} \
+              --resource-group $(resourceGroupName) \
+              --log-file $(Build.ArtifactStagingDirectory)/smoke-logs/runtime-${{ parameters.environmentName }}-$(Build.BuildId).zip \
+              2>/dev/null || echo "Note: diagnostics may not be enabled — enable in App Service → Monitoring → App Service logs."
+
+            # Print recent container log lines to pipeline output
+            echo "─── Recent container log ───"
+            az webapp log tail \
+              --name ${{ parameters.appName }} \
+              --resource-group $(resourceGroupName) \
+              --timeout 10 \
+              2>/dev/null || true
+
+      - task: PublishPipelineArtifact@1
+        displayName: "Publish runtime logs"
+        condition: always()
+        inputs:
+          targetPath: $(Build.ArtifactStagingDirectory)/smoke-logs
+          artifact: smoke-logs-${{ parameters.environmentName }}
+          publishLocation: pipeline

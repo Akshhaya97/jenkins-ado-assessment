@@ -1,0 +1,86 @@
+parameters:
+  - name: vmImage
+    type: string
+  - name: dockerfilePath
+    type: string
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BUILD-CONTAINER TEMPLATE
+#
+# Immutable promotion approach:
+#   Every image is built ONCE and tagged with two immutable identifiers:
+#     • $(Build.BuildId)              — ADO pipeline run number (numeric, unique)
+#     • git-<shortSha>               — first 8 chars of git commit SHA
+#   The image is saved as a pipeline artifact (image.tar.gz) so downstream
+#   stages (security-scan, push-acr) use the exact same binary — never rebuilt.
+#
+#   Promotion path:  build → scan → push :BuildId → deploy → tag :stable
+#   "latest" is never used for deployments.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  - job: BuildAndTest
+    displayName: "Maven test + Docker build"
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+      - checkout: self
+        fetchDepth: 0   # full history so git rev-parse works
+
+      # Compute short git SHA — used as a human-readable immutable image tag
+      - script: |
+          SHORT_SHA=$(echo "$(Build.SourceVersion)" | cut -c1-8)
+          echo "Short git SHA: $SHORT_SHA"
+          echo "##vso[task.setvariable variable=shortSha;isOutput=true]$SHORT_SHA"
+        name: setVars
+        displayName: "Compute short git SHA"
+
+      # Maven: run tests and produce the JAR
+      - task: Maven@4
+        displayName: "Maven: test + package (Java 17)"
+        inputs:
+          mavenPomFile: apps/spring-petclinic/pom.xml
+          goals: "test package -DskipITs"
+          publishJUnitResults: true
+          testResultsFiles: "**/surefire-reports/TEST-*.xml"
+          javaHomeOption: JDKVersion
+          jdkVersionOption: "1.17"
+
+      # Publish the test results and JAR as pipeline artifacts for traceability
+      - task: PublishPipelineArtifact@1
+        displayName: "Publish JAR artifact"
+        inputs:
+          targetPath: apps/spring-petclinic/target
+          artifact: jar-artifact
+          publishLocation: pipeline
+
+      # Docker build — build context is repo root (Dockerfile copies from apps/)
+      # Tags: Build.BuildId (pipeline-unique) + git-<shortSha> (commit-traceable)
+      - task: Docker@2
+        displayName: "Docker: build image"
+        inputs:
+          command: build
+          Dockerfile: ${{ parameters.dockerfilePath }}
+          buildContext: $(Build.SourcesDirectory)
+          repository: $(imageRepository)
+          tags: |
+            $(Build.BuildId)
+            git-$(setVars.shortSha)
+          arguments: "--label git_sha=$(Build.SourceVersion) --label build_id=$(Build.BuildId)"
+
+      # Save the built image as a pipeline artifact so downstream stages use
+      # the SAME binary — no rebuilds, guarantees what was scanned = what is pushed
+      - script: |
+          docker save \
+            $(imageRepository):$(Build.BuildId) \
+            $(imageRepository):git-$(setVars.shortSha) \
+            | gzip > $(Build.ArtifactStagingDirectory)/image.tar.gz
+
+          echo "Image archive size: $(du -sh $(Build.ArtifactStagingDirectory)/image.tar.gz | cut -f1)"
+        displayName: "Export image to tar.gz artifact"
+
+      - task: PublishPipelineArtifact@1
+        displayName: "Publish image artifact"
+        inputs:
+          targetPath: $(Build.ArtifactStagingDirectory)/image.tar.gz
+          artifact: docker-image
+          publishLocation: pipeline

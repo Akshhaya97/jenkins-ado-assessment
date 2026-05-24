@@ -1,0 +1,25 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+.terraform.lock.hcl
+
+# Large binaries / archives
+*.tar.gz
+*.zip
+
+# macOS
+.DS_Store
+
+# Java / Maven / Gradle build outputs
+target/
+build/
+*.class
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+.vscode/

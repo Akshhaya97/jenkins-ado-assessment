@@ -1,0 +1,91 @@
+parameters:
+  - name: environmentName
+    type: string
+  - name: azureSubscription
+    type: string
+  - name: appName
+    type: string
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOY-APPSERVICE TEMPLATE
+#
+# Deploys the immutably tagged container image to Azure App Service for Containers.
+# Uses deployment job type so ADO Environment approval gates are enforced.
+#
+# Production approval gate setup (one-time, in ADO UI):
+#   ADO → Environments → prod → Approvals and Checks → + Approvals
+#   → add approvers → set timeout → Save
+#
+# After a successful prod deploy, the image is tagged :stable in ACR.
+# The Rollback stage uses :stable to revert if post-deploy validation fails.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  - deployment: Deploy_${{ parameters.environmentName }}
+    displayName: "Deploy to ${{ parameters.environmentName }}"
+    environment: ${{ parameters.environmentName }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            # Deploy container image by immutable BuildId tag — never "latest"
+            - task: AzureWebAppContainer@1
+              displayName: "Deploy $(imageRepository):$(Build.BuildId) to App Service"
+              inputs:
+                azureSubscription: ${{ parameters.azureSubscription }}
+                appName: ${{ parameters.appName }}
+                containers: $(acrLoginServer)/$(imageRepository):$(Build.BuildId)
+
+            # Capture App Service deployment logs immediately after deploy
+            - task: AzureCLI@2
+              displayName: "Capture deployment logs"
+              condition: always()
+              inputs:
+                azureSubscription: ${{ parameters.azureSubscription }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  echo "Fetching App Service deployment logs for ${{ parameters.appName }}..."
+                  mkdir -p $(Build.ArtifactStagingDirectory)/logs
+
+                  # Download container logs as zip archive
+                  az webapp log download \
+                    --name ${{ parameters.appName }} \
+                    --resource-group $(resourceGroupName) \
+                    --log-file $(Build.ArtifactStagingDirectory)/logs/appservice-${{ parameters.environmentName }}-$(Build.BuildId).zip \
+                    2>/dev/null || echo "Note: log download requires diagnostics enabled on the App Service."
+
+                  # Tail live container log to pipeline output (15s window)
+                  echo "─── Live container log tail ───"
+                  az webapp log tail \
+                    --name ${{ parameters.appName }} \
+                    --resource-group $(resourceGroupName) \
+                    --timeout 15 \
+                    2>/dev/null || echo "Note: log streaming unavailable (enable Application Logging in App Service)."
+
+            # Publish deployment logs as a pipeline artifact for audit
+            - task: PublishPipelineArtifact@1
+              displayName: "Publish deployment logs"
+              condition: always()
+              inputs:
+                targetPath: $(Build.ArtifactStagingDirectory)/logs
+                artifact: deploy-logs-${{ parameters.environmentName }}
+                publishLocation: pipeline
+
+            # After successful prod deploy: tag this image :stable in ACR.
+            # The Rollback stage re-deploys :stable if post-deploy validation fails.
+            - ${{ if eq(parameters.environmentName, 'prod') }}:
+              - task: AzureCLI@2
+                displayName: "Tag image as :stable in ACR (prod promotion)"
+                inputs:
+                  azureSubscription: ${{ parameters.azureSubscription }}
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  inlineScript: |
+                    echo "Promoting $(imageRepository):$(Build.BuildId) → :stable"
+                    az acr import \
+                      --name $(acrName) \
+                      --source $(acrLoginServer)/$(imageRepository):$(Build.BuildId) \
+                      --image $(imageRepository):stable \
+                      --force
+                    echo "Stable tag updated in ACR."
+

@@ -1,0 +1,74 @@
+parameters:
+  - name: vmImage
+    type: string
+  - name: imageRepository
+    type: string
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUSH-ACR TEMPLATE
+#
+# Loads the scanned image artifact and pushes it to Azure Container Registry.
+# Uses Docker@2 with the ACR service connection — no credentials in the pipeline.
+#
+# Immutable tags pushed:
+#   :$(Build.BuildId)   — primary deployment tag (numeric, pipeline-unique)
+#   :git-<shortSha>     — git commit traceability tag
+#
+# The :stable tag is written only after a successful prod deploy
+# (see deploy-appservice.yml) — it is never written here.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  - job: PushImage
+    displayName: "Push scanned image to ACR"
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+      # Recompute short SHA (each job runs on a fresh agent)
+      - script: |
+          SHORT_SHA=$(echo "$(Build.SourceVersion)" | cut -c1-8)
+          echo "##vso[task.setvariable variable=shortSha]$SHORT_SHA"
+        displayName: "Compute short git SHA"
+
+      # Load the exact artifact that passed the Trivy scan — not a rebuild
+      - task: DownloadPipelineArtifact@2
+        displayName: "Download image artifact"
+        inputs:
+          artifact: docker-image
+          targetPath: $(Pipeline.Workspace)/docker-image
+
+      - script: |
+          docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
+          echo "Loaded images:"
+          docker images ${{ parameters.imageRepository }}
+        displayName: "Load image from artifact"
+
+      # Push :BuildId tag — primary immutable deployment reference
+      - task: Docker@2
+        displayName: "Push :$(Build.BuildId) to ACR"
+        inputs:
+          command: push
+          containerRegistry: $(acrServiceConnection)
+          repository: ${{ parameters.imageRepository }}
+          tags: $(Build.BuildId)
+
+      # Push :git-<sha> tag — links the image back to the exact git commit
+      - task: Docker@2
+        displayName: "Push :git-$(shortSha) to ACR"
+        inputs:
+          command: push
+          containerRegistry: $(acrServiceConnection)
+          repository: ${{ parameters.imageRepository }}
+          tags: git-$(shortSha)
+
+      # Log the full registry reference for downstream stages and audit trail
+      - script: |
+          echo "═══════════════════════════════════════════════════"
+          echo " Image pushed to ACR — immutable references:"
+          echo "   $(acrLoginServer)/${{ parameters.imageRepository }}:$(Build.BuildId)"
+          echo "   $(acrLoginServer)/${{ parameters.imageRepository }}:git-$(shortSha)"
+          echo ""
+          echo " Deployment tag:  $(Build.BuildId)"
+          echo " Git commit:      $(Build.SourceVersion)"
+          echo " Pipeline run:    $(Build.BuildNumber)"
+          echo "═══════════════════════════════════════════════════"
+        displayName: "Log immutable image references"

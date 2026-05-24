@@ -1,0 +1,64 @@
+parameters:
+  - name: targetUrl
+    type: string
+
+jobs:
+  - job: PostDeployValidation
+    displayName: "Post-deployment validation"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      # Wait for the app to be fully ready after deployment
+      - script: |
+          echo "Waiting 45s for application startup..."
+          sleep 45
+        displayName: "Wait for app startup"
+
+      # 1. Health endpoint — must return HTTP 200 with status UP
+      - script: |
+          RESPONSE=$(curl --silent --show-error ${{ parameters.targetUrl }}/actuator/health)
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" ${{ parameters.targetUrl }}/actuator/health)
+
+          echo "Health response: $RESPONSE"
+          echo "HTTP status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "##[error] Health check failed — HTTP $HTTP_STATUS"
+            exit 1
+          fi
+
+          echo "$RESPONSE" | grep -q '"status":"UP"' || {
+            echo "##[error] Health check returned 200 but status is not UP"
+            exit 1
+          }
+
+          echo "##[section] Health check passed"
+        displayName: "Validate /actuator/health"
+
+      # 2. Response time — homepage must respond within 5 seconds
+      - script: |
+          RESPONSE_TIME=$(curl --silent --output /dev/null --write-out "%{time_total}" ${{ parameters.targetUrl }})
+          echo "Response time: ${RESPONSE_TIME}s"
+
+          # Fail if response time exceeds 5 seconds
+          python3 -c "
+          t = float('${RESPONSE_TIME}')
+          if t > 5.0:
+              print(f'##[error] Response time {t:.2f}s exceeds 5s threshold')
+              exit(1)
+          print(f'##[section] Response time {t:.2f}s is within threshold')
+          "
+        displayName: "Validate response time < 5s"
+
+      # 3. App readiness — Spring PetClinic owners listing must return HTTP 200
+      - script: |
+          HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" ${{ parameters.targetUrl }}/owners)
+          echo "Owners endpoint HTTP status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" -ne 200 ]; then
+            echo "##[error] Application readiness check failed — /owners returned HTTP $HTTP_STATUS"
+            exit 1
+          fi
+
+          echo "##[section] Application readiness check passed"
+        displayName: "Validate application readiness (/owners)"

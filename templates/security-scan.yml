@@ -1,0 +1,101 @@
+parameters:
+  - name: vmImage
+    type: string
+  - name: imageRepository
+    type: string
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECURITY-SCAN TEMPLATE
+#
+# Loads the image from the pipeline artifact published by build-container.yml.
+# Scans with Trivy for OS and library CVEs.
+# Outputs:
+#   • trivy-report.json  — full JSON report (published as artifact)
+#   • trivy-report.sarif — SARIF format for ADO Security tab (if extension installed)
+# Pipeline fails on any HIGH or CRITICAL finding.
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  - job: SecurityScan
+    displayName: "Trivy vulnerability scan"
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+      # Load the exact image binary that was built — not a rebuild
+      - task: DownloadPipelineArtifact@2
+        displayName: "Download image artifact"
+        inputs:
+          artifact: docker-image
+          targetPath: $(Pipeline.Workspace)/docker-image
+
+      - script: |
+          docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
+          echo "Loaded image: ${{ parameters.imageRepository }}:$(Build.BuildId)"
+          docker images ${{ parameters.imageRepository }}
+        displayName: "Load image from artifact"
+
+      # Install Trivy via apt for reproducibility (pinned to latest stable release)
+      - script: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -qq
+          sudo apt-get install -y trivy
+          trivy --version
+        displayName: "Install Trivy"
+
+      # Scan — update DB first, then scan the loaded image
+      # JSON report is always produced; SARIF is produced for the ADO Security tab
+      - script: |
+          trivy image --download-db-only
+        displayName: "Update Trivy vulnerability DB"
+
+      - script: |
+          trivy image \
+            --format json \
+            --output $(Build.ArtifactStagingDirectory)/trivy-report.json \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            ${{ parameters.imageRepository }}:$(Build.BuildId)
+        displayName: "Trivy: generate JSON report"
+        continueOnError: true   # capture report even if vulnerabilities found
+
+      - script: |
+          trivy image \
+            --format sarif \
+            --output $(Build.ArtifactStagingDirectory)/trivy-report.sarif \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            ${{ parameters.imageRepository }}:$(Build.BuildId)
+        displayName: "Trivy: generate SARIF report"
+        continueOnError: true
+
+      # Print human-readable summary to pipeline log
+      - script: |
+          echo "═══════════════════════════════════════"
+          echo " Trivy Vulnerability Summary"
+          echo "═══════════════════════════════════════"
+          trivy image \
+            --format table \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            ${{ parameters.imageRepository }}:$(Build.BuildId)
+        displayName: "Trivy: print table summary"
+
+      # Fail the pipeline if any HIGH or CRITICAL vuln is found
+      - script: |
+          trivy image \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --quiet \
+            ${{ parameters.imageRepository }}:$(Build.BuildId)
+        displayName: "Trivy: enforce policy (fail on HIGH/CRITICAL)"
+
+      # Publish reports as pipeline artifacts for audit trail
+      - task: PublishPipelineArtifact@1
+        displayName: "Publish Trivy reports"
+        condition: always()   # publish even if scan fails
+        inputs:
+          targetPath: $(Build.ArtifactStagingDirectory)
+          artifact: trivy-reports
+          publishLocation: pipeline

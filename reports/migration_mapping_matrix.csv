@@ -1,0 +1,55 @@
+category,legacy_tool,legacy_concept,legacy_example,azure_devops_yaml,github_actions,notes
+Pipeline definition,Jenkins,Jenkinsfile,"pipeline { stages { ... } }",azure-pipelines.yml at repo root,.github/workflows/*.yml,All three use YAML at repo root; ADO requires trigger block
+Pipeline definition,Bamboo,bamboo-specs.yml,"plan: key: CI stages: - Build:",azure-pipelines.yml,No direct equivalent — convert to GHA workflow,Bamboo Specs are unique; nearest GHA equivalent is workflow_dispatch
+Pipeline definition,GitLab,.gitlab-ci.yml,"stages: [build, deploy]",azure-pipelines.yml,.github/workflows/*.yml,Structural concepts are identical across all three
+Trigger,Jenkins,SCM polling / webhook,"triggers { pollSCM('H/5 * * * *') }","trigger: branches: include: [main]","on: push: branches: [main]",Replace polling with push-based webhooks in both
+Trigger,Bamboo,Plan triggers,"triggers: polling: period: 60","trigger: branches:","on: push:",Bamboo polling → webhook trigger in ADO/GHA
+Trigger,GitLab,push / MR triggers,"only: [main] / rules: - if: $CI_COMMIT_BRANCH","trigger: pr: branches:","on: pull_request: push:",Near-identical model; GHA uses 'on' block
+Trigger,Jenkins,Manual / parameterised build,"parameters { string(name:'ENV') }","parameters: - name: ENV type: string","on: workflow_dispatch: inputs: env:",ADO and GHA both support manual trigger with typed inputs
+Stage grouping,Jenkins,stage,"stage('Build') { steps {...} }","stages: - stage: Build","jobs: build: (no stage wrapper)","GHA uses jobs as top-level grouping; no stage keyword"
+Stage grouping,Bamboo,Bamboo stage,"stages: - Build: jobs: - TestAndPackage","stages: - stage: Build jobs:","jobs: with needs: dependency chain",ADO stages map directly; GHA uses needs: for ordering
+Stage grouping,GitLab,stages array,"stages: [test, build, deploy]","stages: - stage: Test - stage: Build",jobs with ordering via needs:,GHA has no explicit stage; use needs: for DAG ordering
+Job / task,Jenkins,steps block,"steps { sh './mvnw test' }","steps: - script: ./mvnw test","steps: - run: ./mvnw test",Identical concept; syntax differs slightly
+Job / task,Bamboo,tasks block,"tasks: - script: ./mvnw test","steps: - task: Maven@4","steps: - uses: actions/setup-java then run: mvn",ADO has native Maven@4 task; GHA uses actions/setup-java
+Job / task,GitLab,script block,"script: - ./mvnw package","steps: - script: ./mvnw package","steps: - run: ./mvnw package",Direct lift-and-shift for script steps
+Parallel execution,Jenkins,parallel block,"parallel { stage('A'){} stage('B'){} }","jobs: - job: A - job: B (same stage)",jobs: a: b: (parallel by default),ADO: jobs in same stage run in parallel by default
+Parallel execution,GitLab,parallel matrix,"parallel: matrix: - VAR: [a,b]","strategy: matrix:","strategy: matrix: include:",Matrix strategy maps directly in both ADO and GHA
+Agent / runner,Jenkins,agent any,agent any,"pool: vmImage: ubuntu-latest","runs-on: ubuntu-latest","'any' → Microsoft-hosted agent; be explicit about OS image"
+Agent / runner,Jenkins,labelled agent,"agent { label 'linux-docker' }","pool: name: ado-selfhosted-linux","runs-on: [self-hosted, linux, docker]",ADO pool name; GHA uses runs-on labels array
+Agent / runner,Bamboo,local / remote agent,local or remote Bamboo agent,"pool: name: ado-selfhosted-linux","runs-on: self-hosted",Register same VM as ADO self-hosted agent or GHA runner
+Agent / runner,GitLab,runner tags,"tags: [docker]","pool: demands: [docker]","runs-on: [self-hosted, docker]",Tag → pool demand (ADO) or runs-on label (GHA)
+Environment variables,Jenkins,environment block,"environment { IMAGE='petclinic' }","variables: IMAGE: petclinic","env: IMAGE: petclinic",Direct mapping; scoped to pipeline or job level
+Environment variables,Bamboo,plan variables,${bamboo.buildNumber},$(Build.BuildId),${{ github.run_number }},All three provide built-in run/build number variables
+Environment variables,GitLab,variables block,"variables: IMAGE: petclinic","variables: IMAGE: petclinic","env: IMAGE: petclinic",Identical structure; just move the block
+Secrets / credentials,Jenkins,withCredentials,"withCredentials([usernamePassword(...)])","variables: group: petclinic-shared (Key Vault linked)",${{ secrets.REGISTRY_PASS }},Migrate all secrets to Key Vault (ADO) or Encrypted Secrets (GHA)
+Secrets / credentials,Bamboo,sensitive plan variables,${bamboo.REGISTRY_PASS},"variable group + Key Vault secret link",${{ secrets.REGISTRY_PASS }},Never store secrets in pipeline YAML; use vault or secret store
+Secrets / credentials,GitLab,protected CI variables,$REGISTRY_PASS,"variable group + Key Vault link",${{ secrets.REGISTRY_PASS }},Protected variables → GHA encrypted secrets or ADO Key Vault link
+Artifact storage,Jenkins,archiveArtifacts,"archiveArtifacts 'target/*.jar'","PublishBuildArtifacts@1 pathToPublish: target","actions/upload-artifact path: target",Both ADO and GHA retain artifacts scoped per run
+Artifact storage,Bamboo,artifacts block,"artifacts: - name: petclinic-jar location: target",PublishBuildArtifacts@1,actions/upload-artifact,Same concept; artifacts scoped to run in all three
+Artifact storage,GitLab,artifacts paths,"artifacts: paths: [target/]",PublishBuildArtifacts@1,actions/upload-artifact,Direct equivalent in both targets
+Container registry,Jenkins,docker push,"docker push $REGISTRY/$IMAGE:$BUILD_NUMBER","Docker@2 command: buildAndPush","docker/build-push-action push: true",Use ACR + managed identity (ADO) or OIDC (GHA) — no plain-text creds
+Container registry,Bamboo,docker push in task,"script: docker push $REGISTRY/$IMAGE","Docker@2 buildAndPush",docker/build-push-action,Same migration path — replace registry URL with ACR
+Container registry,GitLab,docker build/push in script,"script: - docker build - docker push","Docker@2 buildAndPush",docker/build-push-action,Identical migration path for all three tools
+Deployment,Jenkins,shell deploy script,"sh './scripts/deploy-vm.sh dev'","AzureWebAppContainer@1 or Kubernetes@1","azure/webapps-deploy or azure/k8s-deploy",Replace VM SSH script with platform-native deploy task
+Deployment,Bamboo,deploy task in stage,"script: ./scripts/deploy-vm.sh dev",AzureWebAppContainer@1,azure/webapps-deploy,Bamboo deployment project → ADO environment with approval
+Deployment,GitLab,deploy job,"script: - ./deploy.sh $CI_ENVIRONMENT_NAME",AzureWebAppContainer@1,azure/webapps-deploy,GitLab environments → ADO Environments resource
+Manual approval gate,Jenkins,input step,"input message: 'Deploy to prod?'","ADO Environment → Approvals and Checks","environment: production (required-reviewers)",Native approval UX in both ADO and GHA; no plugin needed
+Manual approval gate,Bamboo,manual stage,"stages: - DeployDev: manual: true",ADO Environment approval check,environment: production required reviewers,Bamboo manual stage → ADO/GHA environment protection rule
+Manual approval gate,GitLab,when: manual,"when: manual on deploy job",ADO Environment approval check,environment: production required reviewers,All three support branch/env protection + manual gate
+Test results,Jenkins,junit publisher,"junit 'target/surefire-reports/*.xml'","PublishTestResults@2 testResultsFormat: JUnit",dorny/test-reporter or actions/upload-artifact,ADO natively renders JUnit; GHA needs a third-party action
+Test results,Bamboo,test results parser,Bamboo auto-parses after Maven task,PublishTestResults@2,dorny/test-reporter,Same JUnit XML format works in all targets
+Test results,GitLab,artifacts reports junit,"artifacts: reports: junit: target/surefire-reports/*.xml",PublishTestResults@2,dorny/test-reporter,Identical JUnit XML; just change the reporting step
+Dependency ordering,Jenkins,sequential stages (default),Stages execute top-to-bottom,"stages with dependsOn:","jobs with needs:",Explicit dependency declaration required in ADO and GHA
+Dependency ordering,GitLab,needs keyword,"job_b: needs: [job_a]","dependsOn: [job_a] on stage","needs: [job_a] on job",Near-identical DAG model; ADO uses dependsOn / GHA uses needs
+Reusable logic,Jenkins,shared library,"@Library('shared') import utils","template: steps/build.yml@templates","uses: org/repo/.github/workflows/build.yml@main",ADO templates = GHA reusable workflows; both stored in repos
+Reusable logic,GitLab,include templates,"include: - project: org/templates file: build.yml","template: steps/build.yml@templates","uses: org/repo/.github/workflows/build.yml@main",Direct concept mapping; path syntax differs
+Conditional execution,Jenkins,when block,"when { branch 'main' }","condition: eq(variables['Build.SourceBranch'],'refs/heads/main')","if: github.ref == 'refs/heads/main'",All three support branch-scoped conditional execution
+Conditional execution,GitLab,rules / only,"rules: - if: $CI_COMMIT_BRANCH == 'main'",condition: expression,if: github.ref,GitLab rules are most expressive; ADO conditions are equivalent
+Security scan,Jenkins,Trivy plugin / shell,"sh 'trivy image $IMAGE'","template: templates/security-scan.yml","aquasecurity/trivy-action",Both support Trivy natively via task/action
+Security scan,GitLab,SAST template,"include: template: SAST.gitlab-ci.yml","MicrosoftSecurityDevOps@1 or Trivy task",github/codeql-action/analyze,ADO: use MSDO or Trivy task; GHA: use CodeQL or Trivy action
+Build caching,Jenkins,stash / unstash,"stash name:'m2' includes:'.m2/**'","Cache@2 key: pom.xml path: ~/.m2","actions/cache key: pom.xml path: ~/.m2",ADO Cache@2 and GHA actions/cache are conceptually identical
+Build caching,GitLab,cache keyword,"cache: key: $CI_COMMIT_REF_SLUG paths: [.m2/]",Cache@2,actions/cache,Direct migration; key strategy stays the same
+Post-build steps,Jenkins,post block,"post { always { junit ... } }","condition: always() on step","if: always() on step",post block → conditional step in both ADO and GHA
+Post-build steps,GitLab,after_script,after_script: - cleanup.sh,"condition: always() step","if: always() step",Identical concept; runs after job regardless of outcome
+Authentication,Jenkins,docker login with creds,"withCredentials → docker login",Service connection to ACR (no credentials in YAML),azure/docker-login with OIDC,Eliminate plain-text creds; use managed identity or OIDC
+Authentication,GitLab,protected variables for login,$CI_REGISTRY_PASSWORD in script,Service connection to ACR,"azure/login with federated credentials (OIDC)",OIDC is the recommended zero-secret approach in GHA

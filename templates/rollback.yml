@@ -1,0 +1,54 @@
+parameters:
+  - name: azureSubscription
+    type: string
+  - name: appName
+    type: string
+  - name: imageRepository
+    type: string
+
+jobs:
+  - job: Rollback
+    displayName: "Rollback to last stable image"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      # Re-deploy the image tagged "stable" — set by deploy-appservice.yml on each
+      # successful prod deploy.  If no stable tag exists yet, this step will fail
+      # with a clear error from az webapp config container set.
+      - task: AzureCLI@2
+        displayName: "Redeploy stable image to App Service"
+        inputs:
+          azureSubscription: ${{ parameters.azureSubscription }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            echo "##[warning] Deployment or validation failed — rolling back to stable image."
+
+            az webapp config container set \
+              --name ${{ parameters.appName }} \
+              --resource-group $(resourceGroupName) \
+              --container-image-name $(acrLoginServer)/${{ parameters.imageRepository }}:stable
+
+            echo "Rollback complete. Restarting app service..."
+            az webapp restart \
+              --name ${{ parameters.appName }} \
+              --resource-group $(resourceGroupName)
+
+      - task: AzureCLI@2
+        displayName: "Validate rollback health"
+        inputs:
+          azureSubscription: ${{ parameters.azureSubscription }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            echo "Waiting 30s for app to restart after rollback..."
+            sleep 30
+
+            HTTP_STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" $(prodSmokeTestUrl)/actuator/health)
+
+            if [ "$HTTP_STATUS" -ne 200 ]; then
+              echo "##[error] Rollback health check failed — HTTP $HTTP_STATUS"
+              exit 1
+            fi
+
+            echo "##[section] Rollback successful — app is healthy (HTTP $HTTP_STATUS)"
