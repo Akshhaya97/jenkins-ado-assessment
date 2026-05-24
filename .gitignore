@@ -9,6 +9,10 @@
 *.tar.gz
 *.zip
 
+# Local secrets — never commit real credentials
+.env
+*.env
+
 # macOS
 .DS_Store
 
