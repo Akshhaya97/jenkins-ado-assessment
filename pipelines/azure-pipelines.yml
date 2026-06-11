@@ -1,20 +1,22 @@
+# Runs only on merge to main — PRs are gated by pipelines/ci/app-ci.yml
 trigger:
   branches:
     include:
       - main
-
-pr:
-  branches:
+  paths:
     include:
-      - main
+      - apps/**
+      - pipelines/**
+
+pr: none   # PR gate is handled by pipelines/ci/app-ci.yml (Branch Policy)
 
 variables:
   - name: imageRepository
     value: petclinic
   - name: dockerfilePath
     value: apps/container/Dockerfile
-  - name: vmImage
-    value: ubuntu-latest
+  - name: agentPool
+    value: self-hosted
   # Variable group linked to Azure Key Vault in ADO → Pipelines → Library.
   # Secrets (acrLoginServer, mysql-password, etc.) are pulled from KV at runtime.
   # The ARM service connection used by this group needs Key Vault Secrets User role.
@@ -27,7 +29,7 @@ stages:
     jobs:
       - template: templates/build-container.yml
         parameters:
-          vmImage: $(vmImage)
+          agentPool: $(agentPool)
           dockerfilePath: $(dockerfilePath)
 
 # ── Stage 2: Scan image for HIGH/CRITICAL CVEs ───────────────────────────────
@@ -37,7 +39,7 @@ stages:
     jobs:
       - template: templates/security-scan.yml
         parameters:
-          vmImage: $(vmImage)
+          agentPool: $(agentPool)
           imageRepository: $(imageRepository)
 
 # ── Stage 3: Push verified image to ACR ──────────────────────────────────────
@@ -47,7 +49,7 @@ stages:
     jobs:
       - template: templates/push-acr.yml
         parameters:
-          vmImage: $(vmImage)
+          agentPool: $(agentPool)
           imageRepository: $(imageRepository)
 
 # ── Stage 4: Deploy to Dev (auto-approved ADO environment) ───────────────────
@@ -57,6 +59,7 @@ stages:
     jobs:
       - template: templates/deploy-appservice.yml
         parameters:
+          agentPool: $(agentPool)
           environmentName: dev
           azureSubscription: $(azureServiceConnection)
           appName: $(appServiceNameDev)
@@ -68,6 +71,7 @@ stages:
     jobs:
       - template: templates/smoke-test.yml
         parameters:
+          agentPool: $(agentPool)
           targetUrl: $(devSmokeTestUrl)
           azureSubscription: $(azureServiceConnection)
           appName: $(appServiceNameDev)
@@ -84,6 +88,7 @@ stages:
     jobs:
       - template: templates/deploy-appservice.yml
         parameters:
+          agentPool: $(agentPool)
           environmentName: prod
           azureSubscription: $(azureServiceConnection)
           appName: $(appServiceNameProd)
@@ -97,6 +102,7 @@ stages:
     jobs:
       - template: templates/post-deploy-validation.yml
         parameters:
+          agentPool: $(agentPool)
           targetUrl: $(prodSmokeTestUrl)
 
 # ── Stage 8: Rollback ─────────────────────────────────────────────────────────
@@ -115,6 +121,7 @@ stages:
     jobs:
       - template: templates/rollback.yml
         parameters:
+          agentPool: $(agentPool)
           azureSubscription: $(azureServiceConnection)
           appName: $(appServiceNameProd)
           imageRepository: $(imageRepository)

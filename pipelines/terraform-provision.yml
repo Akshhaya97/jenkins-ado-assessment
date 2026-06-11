@@ -1,0 +1,319 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TERRAFORM INFRASTRUCTURE PROVISIONING PIPELINE
+#
+# Provisions all Azure resources defined in iac/terraform/ using the modules:
+#   resource_group, networking, firewall, container_registry, app_service_plan,
+#   app_service, app_gateway, mysql, key_vault, identity, monitoring,
+#   private_dns, private_endpoint
+#
+# Flow (single pipeline run, sequential):
+#   Validate → Plan Dev → Apply Dev (auto) → Verify Dev
+#           → Plan Prod → Apply Prod (manual approval) → Verify Prod
+#
+# Approval gate for prod:
+#   Configure in ADO → Pipelines → Environments → infra-prod → Approvals and Checks
+#   The pipeline auto-deploys dev, then PAUSES at prod apply until an approver approves.
+#
+# Prerequisites in ADO Library (petclinic-shared variable group):
+#   - tfStateStorageAccount  : Storage account name for Terraform remote state
+#   - tfStateContainer       : Blob container name (e.g. tfstate)
+#   - tfStateResourceGroup   : Resource group hosting the storage account
+#   - mysqlAdminPassword     : MySQL admin password (sourced from Key Vault)
+#   - ARM_CLIENT_ID, ARM_CLIENT_SECRET, ARM_SUBSCRIPTION_ID, ARM_TENANT_ID
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Runs only on merge to main — PRs are gated by pipelines/ci/terraform-ci.yml
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - iac/terraform/**
+
+pr: none   # PR gate is handled by pipelines/ci/terraform-ci.yml (Branch Policy)
+
+variables:
+  - name: agentPool
+    value: self-hosted
+  - name: workingDirectory
+    value: iac/terraform
+  - group: petclinic-shared
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 1 — Validate (shared, environment-agnostic)
+# ─────────────────────────────────────────────────────────────────────────────
+stages:
+  - stage: Validate
+    displayName: "Terraform Validate"
+    jobs:
+      - job: TerraformValidate
+        displayName: "fmt + validate"
+        pool:
+          name: $(agentPool)
+        steps:
+          - checkout: self
+
+          - script: terraform version
+            displayName: "Verify Terraform version"
+
+          - script: terraform fmt -check -recursive
+            displayName: "terraform fmt (fail if not formatted)"
+            workingDirectory: $(workingDirectory)
+
+          - script: |
+              terraform init -backend=false -input=false
+            displayName: "terraform init (no backend)"
+            workingDirectory: $(workingDirectory)
+
+          - script: terraform validate
+            displayName: "terraform validate"
+            workingDirectory: $(workingDirectory)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 2 — Plan Dev
+# ─────────────────────────────────────────────────────────────────────────────
+  - stage: PlanDev
+    displayName: "Plan — Dev"
+    dependsOn: Validate
+    jobs:
+      - job: TerraformPlanDev
+        displayName: "terraform plan (dev)"
+        pool:
+          name: $(agentPool)
+        steps:
+          - checkout: self
+
+          - script: |
+              terraform init \
+                -input=false \
+                -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                -backend-config="container_name=$(tfStateContainer)" \
+                -backend-config="key=dev.terraform.tfstate"
+            displayName: "terraform init (dev backend)"
+            workingDirectory: $(workingDirectory)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          - script: |
+              terraform plan \
+                -input=false \
+                -out=$(Build.ArtifactStagingDirectory)/tfplan-dev \
+                -var="mysql_admin_password=$(mysqlAdminPassword)"
+            displayName: "terraform plan (dev)"
+            workingDirectory: $(workingDirectory)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          - script: |
+              terraform show -no-color $(Build.ArtifactStagingDirectory)/tfplan-dev \
+                > $(Build.ArtifactStagingDirectory)/tfplan-dev.txt
+            displayName: "terraform show (human-readable)"
+            workingDirectory: $(workingDirectory)
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish dev plan artifacts"
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)
+              artifact: tfplan-dev
+              publishLocation: pipeline
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3 — Apply Dev (auto — no approval required)
+#   ADO Environment "infra-dev": configure with NO approval check
+# ─────────────────────────────────────────────────────────────────────────────
+  - stage: ApplyDev
+    displayName: "Apply — Dev (auto)"
+    dependsOn: PlanDev
+    jobs:
+      - deployment: TerraformApplyDev
+        displayName: "terraform apply → dev"
+        pool:
+          name: $(agentPool)
+        environment: infra-dev   # no approval check → runs automatically
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: "Download dev plan"
+                  inputs:
+                    artifact: tfplan-dev
+                    targetPath: $(Pipeline.Workspace)/tfplan-dev
+
+                - script: |
+                    terraform init \
+                      -input=false \
+                      -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                      -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                      -backend-config="container_name=$(tfStateContainer)" \
+                      -backend-config="key=dev.terraform.tfstate"
+                  displayName: "terraform init (dev backend)"
+                  workingDirectory: $(workingDirectory)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+                - script: |
+                    terraform apply \
+                      -input=false \
+                      -auto-approve \
+                      $(Pipeline.Workspace)/tfplan-dev/tfplan-dev
+                  displayName: "terraform apply (dev)"
+                  workingDirectory: $(workingDirectory)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+                - script: |
+                    echo "════════════════════════════════"
+                    echo " Dev Outputs"
+                    echo "════════════════════════════════"
+                    terraform output
+                  displayName: "terraform output (dev)"
+                  workingDirectory: $(workingDirectory)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 4 — Plan Prod (runs after dev apply succeeds)
+# ─────────────────────────────────────────────────────────────────────────────
+  - stage: PlanProd
+    displayName: "Plan — Prod"
+    dependsOn: ApplyDev
+    condition: succeeded('ApplyDev')
+    jobs:
+      - job: TerraformPlanProd
+        displayName: "terraform plan (prod)"
+        pool:
+          name: $(agentPool)
+        steps:
+          - checkout: self
+
+          - script: |
+              terraform init \
+                -input=false \
+                -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                -backend-config="container_name=$(tfStateContainer)" \
+                -backend-config="key=prod.terraform.tfstate"
+            displayName: "terraform init (prod backend)"
+            workingDirectory: $(workingDirectory)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          - script: |
+              terraform plan \
+                -input=false \
+                -out=$(Build.ArtifactStagingDirectory)/tfplan-prod \
+                -var="mysql_admin_password=$(mysqlAdminPassword)"
+            displayName: "terraform plan (prod)"
+            workingDirectory: $(workingDirectory)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          - script: |
+              terraform show -no-color $(Build.ArtifactStagingDirectory)/tfplan-prod \
+                > $(Build.ArtifactStagingDirectory)/tfplan-prod.txt
+              echo "════ PROD PLAN SUMMARY ════"
+              tail -5 $(Build.ArtifactStagingDirectory)/tfplan-prod.txt
+            displayName: "terraform show (human-readable)"
+            workingDirectory: $(workingDirectory)
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish prod plan artifacts"
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)
+              artifact: tfplan-prod
+              publishLocation: pipeline
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 5 — Apply Prod (PAUSES for manual approval)
+#   ADO Environment "infra-prod": configure REQUIRED approval check:
+#     ADO → Pipelines → Environments → infra-prod → Approvals and Checks → + Approvals
+#   Approver should review the tfplan-prod artifact before approving.
+# ─────────────────────────────────────────────────────────────────────────────
+  - stage: ApplyProd
+    displayName: "Apply — Prod (approval required)"
+    dependsOn: PlanProd
+    condition: succeeded('PlanProd')
+    jobs:
+      - deployment: TerraformApplyProd
+        displayName: "terraform apply → prod"
+        pool:
+          name: $(agentPool)
+        environment: infra-prod   # ← approval check configured here in ADO UI
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: "Download prod plan"
+                  inputs:
+                    artifact: tfplan-prod
+                    targetPath: $(Pipeline.Workspace)/tfplan-prod
+
+                - script: |
+                    terraform init \
+                      -input=false \
+                      -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                      -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                      -backend-config="container_name=$(tfStateContainer)" \
+                      -backend-config="key=prod.terraform.tfstate"
+                  displayName: "terraform init (prod backend)"
+                  workingDirectory: $(workingDirectory)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+                - script: |
+                    terraform apply \
+                      -input=false \
+                      -auto-approve \
+                      $(Pipeline.Workspace)/tfplan-prod/tfplan-prod
+                  displayName: "terraform apply (prod)"
+                  workingDirectory: $(workingDirectory)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+                - script: |
+                    echo "════════════════════════════════"
+                    echo " Prod Outputs"
+                    echo "════════════════════════════════"
+                    terraform output
+                  displayName: "terraform output (prod)"
+                  workingDirectory: $(workingDirectory)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)

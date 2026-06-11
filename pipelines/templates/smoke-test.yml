@@ -1,4 +1,6 @@
 parameters:
+  - name: agentPool
+    type: string
   - name: targetUrl
     type: string
   - name: azureSubscription
@@ -25,7 +27,7 @@ jobs:
   - job: SmokeTest
     displayName: "Smoke test — ${{ parameters.environmentName }}"
     pool:
-      vmImage: ubuntu-latest
+      name: ${{ parameters.agentPool }}
     steps:
       # Wait for App Service container pull and Spring Boot startup
       - script: |

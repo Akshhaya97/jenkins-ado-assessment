@@ -1,5 +1,5 @@
 parameters:
-  - name: vmImage
+  - name: agentPool
     type: string
   - name: imageRepository
     type: string
@@ -21,7 +21,7 @@ jobs:
   - job: PushImage
     displayName: "Push scanned image to ACR"
     pool:
-      vmImage: ${{ parameters.vmImage }}
+      name: ${{ parameters.agentPool }}
     steps:
       # Recompute short SHA (each job runs on a fresh agent)
       - script: |

@@ -1,0 +1,4 @@
+app_name,cloud_compatibility,notes
+ScriptRunner,review,Validate feature parity and automation behavior
+Tempo Timesheets,compatible,Supported by cloud migration path
+Custom Legacy Plugin,not-supported,Replace with Forge app or process redesign

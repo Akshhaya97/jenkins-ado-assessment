@@ -1,0 +1,5 @@
+username,status,group_name
+alice,active,developers
+bob,active,release-managers
+carol,inactive,developers
+dave,active,admins
