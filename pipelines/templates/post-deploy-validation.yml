@@ -1,4 +1,6 @@
 parameters:
+  - name: agentPool
+    type: string
   - name: targetUrl
     type: string
 
@@ -6,7 +8,7 @@ jobs:
   - job: PostDeployValidation
     displayName: "Post-deployment validation"
     pool:
-      vmImage: ubuntu-latest
+      name: ${{ parameters.agentPool }}
     steps:
       # Wait for the app to be fully ready after deployment
       - script: |

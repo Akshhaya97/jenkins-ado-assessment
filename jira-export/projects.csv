@@ -1,0 +1,4 @@
+project_key,project_name,complexity,workflow_count,attachment_count
+PET,PetClinic,medium,4,120
+OPS,Operations,low,2,35
+ERP,ERP-Core,high,9,460

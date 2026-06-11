@@ -1,0 +1,129 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TERRAFORM CI PIPELINE  (PR gate — no apply)
+#
+# Runs on every PR targeting main that touches Terraform files.
+# Must pass before the PR can be merged (enforced via ADO Branch Policy).
+#
+# Steps:
+#   1. terraform fmt -check   (formatting enforcement)
+#   2. terraform validate     (syntax + provider schema check)
+#   3. terraform plan         (shows what WOULD change — posted as artifact)
+#
+# The plan output is published as an artifact so reviewers can inspect
+# exactly what infrastructure changes the PR will apply.
+#
+# Configure as a required build validation in ADO:
+#   Repos → Branches → main → Branch Policies → Build Validation → + Add
+#   Select this pipeline, set "Required", trigger: Automatic
+# ─────────────────────────────────────────────────────────────────────────────
+
+trigger: none   # only runs as PR build validation — not on direct push
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - iac/terraform/**
+
+variables:
+  - name: agentPool
+    value: self-hosted
+  - name: workingDirectory
+    value: iac/terraform
+  - name: environment
+    value: dev
+  - group: petclinic-shared   # provides tfState* vars, mysqlAdminPassword, ARM_* credentials
+
+stages:
+# ── Stage 1: Validate ─────────────────────────────────────────────────────────
+  - stage: Validate
+    displayName: "Terraform Validate"
+    jobs:
+      - job: TerraformValidate
+        displayName: "fmt + validate"
+        pool:
+          name: $(agentPool)
+        steps:
+          - checkout: self
+
+          - script: |
+              terraform version
+            displayName: "Verify Terraform version"
+
+          # Fail immediately if any .tf file is not formatted
+          - script: |
+              terraform fmt -check -recursive
+            displayName: "terraform fmt (fail if not formatted)"
+            workingDirectory: $(workingDirectory)
+
+          # init without backend — just downloads providers for validation
+          - script: |
+              terraform init \
+                -backend=false \
+                -input=false
+            displayName: "terraform init (no backend)"
+            workingDirectory: $(workingDirectory)
+
+          - script: |
+              terraform validate
+            displayName: "terraform validate"
+            workingDirectory: $(workingDirectory)
+
+# ── Stage 2: Plan ─────────────────────────────────────────────────────────────
+  - stage: Plan
+    displayName: "Terraform Plan"
+    dependsOn: Validate
+    jobs:
+      - job: TerraformPlan
+        displayName: "terraform plan (preview changes)"
+        pool:
+          name: $(agentPool)
+        steps:
+          - checkout: self
+
+          - script: |
+              terraform init \
+                -input=false \
+                -backend-config="resource_group_name=$(tfStateResourceGroup)" \
+                -backend-config="storage_account_name=$(tfStateStorageAccount)" \
+                -backend-config="container_name=$(tfStateContainer)" \
+                -backend-config="key=$(environment).terraform.tfstate"
+            displayName: "terraform init (remote backend)"
+            workingDirectory: $(workingDirectory)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          - script: |
+              terraform plan \
+                -input=false \
+                -out=$(Build.ArtifactStagingDirectory)/tfplan \
+                -var="mysql_admin_password=$(mysqlAdminPassword)"
+            displayName: "terraform plan"
+            workingDirectory: $(workingDirectory)
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          # Human-readable plan for PR reviewers — visible in pipeline artifacts
+          - script: |
+              terraform show -no-color $(Build.ArtifactStagingDirectory)/tfplan \
+                > $(Build.ArtifactStagingDirectory)/tfplan.txt
+              echo "══════════════════ PLAN SUMMARY ══════════════════"
+              tail -5 $(Build.ArtifactStagingDirectory)/tfplan.txt
+            displayName: "terraform show (human-readable)"
+            workingDirectory: $(workingDirectory)
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish plan for PR review"
+            condition: always()
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/tfplan.txt
+              artifact: terraform-plan-pr
+              publishLocation: pipeline

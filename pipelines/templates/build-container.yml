@@ -1,5 +1,5 @@
 parameters:
-  - name: vmImage
+  - name: agentPool
     type: string
   - name: dockerfilePath
     type: string
@@ -21,7 +21,7 @@ jobs:
   - job: BuildAndTest
     displayName: "Maven test + Docker build"
     pool:
-      vmImage: ${{ parameters.vmImage }}
+      name: ${{ parameters.agentPool }}
     steps:
       - checkout: self
         fetchDepth: 0   # full history so git rev-parse works

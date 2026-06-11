@@ -1,5 +1,5 @@
 parameters:
-  - name: vmImage
+  - name: agentPool
     type: string
   - name: imageRepository
     type: string
@@ -9,6 +9,14 @@ parameters:
 #
 # Loads the image from the pipeline artifact published by build-container.yml.
 # Scans with Trivy for OS and library CVEs.
+# 
+# DESIGN NOTE:
+#   - Image is scanned by content digest (SHA256) not tag, making it tag-independent
+#   - Build stage tags the image with both $(Build.BuildId) and git-$(shortSha)
+#   - Both tags are saved in the tar.gz artifact but refer to same content
+#   - We extract the image ID (digest) once and use it for all Trivy operations
+#   - This ensures consistent, repeatable vulnerability reports
+#
 # Outputs:
 #   • trivy-report.json  — full JSON report (published as artifact)
 #   • trivy-report.sarif — SARIF format for ADO Security tab (if extension installed)
@@ -18,7 +26,7 @@ jobs:
   - job: SecurityScan
     displayName: "Trivy vulnerability scan"
     pool:
-      vmImage: ${{ parameters.vmImage }}
+      name: ${{ parameters.agentPool }}
     steps:
       # Load the exact image binary that was built — not a rebuild
       - task: DownloadPipelineArtifact@2
@@ -31,19 +39,19 @@ jobs:
           docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
           echo "Loaded image: ${{ parameters.imageRepository }}:$(Build.BuildId)"
           docker images ${{ parameters.imageRepository }}
-        displayName: "Load image from artifact"
+          
+          # Extract image digest (content hash) — tag-independent and immutable
+          IMAGE_DIGEST=$(docker inspect ${{ parameters.imageRepository }}:$(Build.BuildId) --format='{{.Id}}')
+          echo "Image digest: $IMAGE_DIGEST"
+          echo "##vso[task.setvariable variable=imageDigest]$IMAGE_DIGEST"
+        displayName: "Load image from artifact + extract digest"
 
-      # Install Trivy via apt for reproducibility (pinned to latest stable release)
+      # Trivy is pre-installed in the self-hosted agent image — just verify it's available
       - script: |
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -qq
-          sudo apt-get install -y trivy
           trivy --version
-        displayName: "Install Trivy"
+        displayName: "Verify Trivy availability"
 
-      # Scan — update DB first, then scan the loaded image
+      # Scan — update DB first, then scan the loaded image by digest
       # JSON report is always produced; SARIF is produced for the ADO Security tab
       - script: |
           trivy image --download-db-only
@@ -55,7 +63,7 @@ jobs:
             --output $(Build.ArtifactStagingDirectory)/trivy-report.json \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
-            ${{ parameters.imageRepository }}:$(Build.BuildId)
+            $(imageDigest)
         displayName: "Trivy: generate JSON report"
         continueOnError: true   # capture report even if vulnerabilities found
 
@@ -65,7 +73,7 @@ jobs:
             --output $(Build.ArtifactStagingDirectory)/trivy-report.sarif \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
-            ${{ parameters.imageRepository }}:$(Build.BuildId)
+            $(imageDigest)
         displayName: "Trivy: generate SARIF report"
         continueOnError: true
 
@@ -78,7 +86,7 @@ jobs:
             --format table \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
-            ${{ parameters.imageRepository }}:$(Build.BuildId)
+            $(imageDigest)
         displayName: "Trivy: print table summary"
 
       # Fail the pipeline if any HIGH or CRITICAL vuln is found
@@ -88,7 +96,7 @@ jobs:
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
             --quiet \
-            ${{ parameters.imageRepository }}:$(Build.BuildId)
+            $(imageDigest)
         displayName: "Trivy: enforce policy (fail on HIGH/CRITICAL)"
 
       # Publish reports as pipeline artifacts for audit trail

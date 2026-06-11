@@ -1,4 +1,6 @@
 parameters:
+  - name: agentPool
+    type: string
   - name: azureSubscription
     type: string
   - name: appName
@@ -10,7 +12,7 @@ jobs:
   - job: Rollback
     displayName: "Rollback to last stable image"
     pool:
-      vmImage: ubuntu-latest
+      name: ${{ parameters.agentPool }}
     steps:
       # Re-deploy the image tagged "stable" — set by deploy-appservice.yml on each
       # successful prod deploy.  If no stable tag exists yet, this step will fail

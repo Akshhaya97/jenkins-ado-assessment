@@ -1,0 +1,154 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# APP CI PIPELINE  (PR gate — no deploy)
+#
+# Runs on every PR targeting main that touches app or pipeline files.
+# Must pass before the PR can be merged (enforced via ADO Branch Policy).
+#
+# Steps:
+#   1. Maven test + package (Java 17)
+#   2. Docker build (image NOT pushed — CI only)
+#   3. Trivy security scan (fails on HIGH/CRITICAL)
+#
+# Configure as a required build validation in ADO:
+#   Repos → Branches → main → Branch Policies → Build Validation → + Add
+#   Select this pipeline, set "Required", trigger: Automatic
+# ─────────────────────────────────────────────────────────────────────────────
+
+trigger: none   # only runs as PR build validation — not on direct push
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - apps/**
+      - pipelines/**
+
+variables:
+  - name: agentPool
+    value: self-hosted
+  - name: imageRepository
+    value: petclinic
+  - name: dockerfilePath
+    value: apps/container/Dockerfile
+  - group: petclinic-shared
+
+stages:
+# ── Stage 1: Build & Test ─────────────────────────────────────────────────────
+  - stage: BuildAndTest
+    displayName: "Build & Test"
+    jobs:
+      - job: MavenBuild
+        displayName: "Maven test + Docker build"
+        pool:
+          name: $(agentPool)
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          # Run unit tests — results published to ADO Tests tab
+          - task: Maven@4
+            displayName: "Maven: test + package (Java 17)"
+            inputs:
+              mavenPomFile: apps/spring-petclinic/pom.xml
+              goals: "test package -DskipITs"
+              publishJUnitResults: true
+              testResultsFiles: "**/surefire-reports/TEST-*.xml"
+              javaHomeOption: JDKVersion
+              jdkVersionOption: "1.17"
+
+          # Build Docker image — not pushed, used only for Trivy scan below
+          - script: |
+              SHORT_SHA=$(echo "$(Build.SourceVersion)" | cut -c1-8)
+              docker build \
+                -f $(dockerfilePath) \
+                -t $(imageRepository):ci-$(Build.BuildId) \
+                --label git_sha=$(Build.SourceVersion) \
+                $(Build.SourcesDirectory)
+            displayName: "Docker build (CI only — not pushed)"
+
+          # Save image as artifact so SecurityScan stage can load it
+          - script: |
+              docker save $(imageRepository):ci-$(Build.BuildId) \
+                | gzip > $(Build.ArtifactStagingDirectory)/image.tar.gz
+              echo "Archive size: $(du -sh $(Build.ArtifactStagingDirectory)/image.tar.gz | cut -f1)"
+            displayName: "Export image to artifact"
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish image artifact"
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/image.tar.gz
+              artifact: docker-image
+              publishLocation: pipeline
+
+# ── Stage 2: Security Scan ────────────────────────────────────────────────────
+  - stage: SecurityScan
+    displayName: "Security Scan"
+    dependsOn: BuildAndTest
+    jobs:
+      - job: TrivyScan
+        displayName: "Trivy vulnerability scan"
+        pool:
+          name: $(agentPool)
+        steps:
+          - task: DownloadPipelineArtifact@2
+            displayName: "Download image artifact"
+            inputs:
+              artifact: docker-image
+              targetPath: $(Pipeline.Workspace)/docker-image
+
+          - script: |
+              docker load < $(Pipeline.Workspace)/docker-image/image.tar.gz
+              docker images $(imageRepository)
+
+              # Extract image digest for tag-independent scanning
+              IMAGE_DIGEST=$(docker inspect $(imageRepository):ci-$(Build.BuildId) --format='{{.Id}}')
+              echo "Image digest: $IMAGE_DIGEST"
+              echo "##vso[task.setvariable variable=imageDigest]$IMAGE_DIGEST"
+            displayName: "Load image + extract digest"
+
+          - script: |
+              trivy --version
+            displayName: "Verify Trivy availability"
+
+          - script: |
+              trivy image --download-db-only
+            displayName: "Update Trivy vulnerability DB"
+
+          - script: |
+              trivy image \
+                --format table \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                $(imageDigest)
+            displayName: "Trivy: print vulnerability summary"
+
+          # CI gate: fail the PR if any HIGH/CRITICAL vuln found
+          - script: |
+              trivy image \
+                --exit-code 1 \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                --quiet \
+                $(imageDigest)
+            displayName: "Trivy: enforce policy (fail on HIGH/CRITICAL)"
+
+          # Always publish the report — visible in pipeline artifacts even on failure
+          - script: |
+              trivy image \
+                --format json \
+                --output $(Build.ArtifactStagingDirectory)/trivy-report.json \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                $(imageDigest)
+            displayName: "Trivy: generate JSON report"
+            condition: always()
+
+          - task: PublishPipelineArtifact@1
+            displayName: "Publish Trivy report"
+            condition: always()
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/trivy-report.json
+              artifact: trivy-ci-report
+              publishLocation: pipeline

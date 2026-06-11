@@ -1,4 +1,6 @@
 parameters:
+  - name: agentPool
+    type: string
   - name: environmentName
     type: string
   - name: azureSubscription
@@ -22,6 +24,8 @@ parameters:
 jobs:
   - deployment: Deploy_${{ parameters.environmentName }}
     displayName: "Deploy to ${{ parameters.environmentName }}"
+    pool:
+      name: ${{ parameters.agentPool }}
     environment: ${{ parameters.environmentName }}
     strategy:
       runOnce:
